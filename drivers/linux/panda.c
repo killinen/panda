@@ -69,9 +69,12 @@ struct panda_dev_priv {
 };
 
 struct __packed panda_usb_can_msg {
+  u16 bus_dat_len;
   u32 rir;
-  u32 bus_dat_len;
   u8 data[8];
+  // u32 rir;
+  // u16 bus_dat_len;
+  // u8 data[8];
 };
 
 static const struct usb_device_id panda_usb_table[] = {
@@ -163,6 +166,20 @@ static int panda_set_output_enable(struct panda_inf_priv* priv, bool enable){
 			 enable ? SAFETY_ALLOUTPUT : SAFETY_SILENT, 0, NULL, 0, USB_CTRL_SET_TIMEOUT);
 }
 
+static int panda_disable_hb_checks(struct panda_inf_priv* priv){
+  return usb_control_msg(priv->priv_dev->udev,
+			 usb_sndctrlpipe(priv->priv_dev->udev, 0),
+			 0xF8, USB_TYPE_VENDOR | USB_RECIP_DEVICE,
+			 0, 0, NULL, 0, USB_CTRL_SET_TIMEOUT);
+}
+
+static int panda_set_power_save_state(struct panda_inf_priv* priv){
+  return usb_control_msg(priv->priv_dev->udev,
+			 usb_sndctrlpipe(priv->priv_dev->udev, 0),
+			 0xE7, USB_TYPE_VENDOR | USB_RECIP_DEVICE,
+			 0 , 0, NULL, 0, USB_CTRL_SET_TIMEOUT);
+}
+
 static void panda_usb_write_bulk_callback(struct urb *urb)
 {
   struct panda_usb_ctx *ctx = urb->context;
@@ -182,7 +199,7 @@ static void panda_usb_write_bulk_callback(struct urb *urb)
   netdev->stats.tx_packets++;
   netdev->stats.tx_bytes += ctx->dlc;
 
-  can_get_echo_skb(netdev, ctx->ndx, NULL);
+  can_get_echo_skb(netdev, ctx->ndx);
 
   if (urb->status)
     netdev_info(netdev, "Tx URB aborted (%d)\n", urb->status);
@@ -199,6 +216,8 @@ static netdev_tx_t panda_usb_xmit(struct panda_inf_priv *priv,
   struct urb *urb;
   u8 *buf;
   int err;
+
+  // printk("Enter panda_usb_xmit");
 
   /* create a URB, and a buffer for it, and copy the data to the URB */
   urb = usb_alloc_urb(0, GFP_ATOMIC);
@@ -256,7 +275,9 @@ static void panda_usb_process_can_rx(struct panda_dev_priv *priv_dev,
   struct panda_inf_priv *priv_inf;
   struct net_device_stats *stats;
 
-  bus_num = (msg->bus_dat_len >> 4) & 0xf;
+  bus_num = (msg->bus_dat_len >> 1) & 0xf;
+  // printk("msg->bus_dat_len %x\n", msg->bus_dat_len);
+  // printk("msg->bus_dat_len >> 1%x\n", msg->bus_dat_len >> 1);
   priv_inf = panda_get_inf_from_bus_id(priv_dev, bus_num);
   if(!priv_inf){
     printk("Got something on an unused interface %d\n", bus_num);
@@ -276,8 +297,12 @@ static void panda_usb_process_can_rx(struct panda_dev_priv *priv_dev,
 
   if(msg->rir & PANDA_CAN_EXTENDED){
     cf->can_id = (msg->rir >> 3) | CAN_EFF_FLAG;
+    printk("PANDA_CAN_EXTENDED\n");
   }else{
-    cf->can_id = (msg->rir >> 21);
+    //cf->can_id = (msg->rir >> 21);    // original
+    //cf->can_id = (msg->rir >> 19);      // This worked
+    cf->can_id = (msg->rir >> 3);
+    printk("PANDA_CAN_STANDARD ID\n");
   }
 
   // TODO: Handle Remote Frames
@@ -285,12 +310,27 @@ static void panda_usb_process_can_rx(struct panda_dev_priv *priv_dev,
   //  cf->can_id |= CAN_RTR_FLAG;
 
 #if LINUX_VERSION_CODE < KERNEL_VERSION(5, 11, 0)
-  cf->can_dlc = get_can_dlc(msg->bus_dat_len & PANDA_DLC_MASK);
+  cf->can_dlc = get_can_dlc((msg->bus_dat_len >> 12) & PANDA_DLC_MASK); 
+  //cf->can_dlc = ((msg->bus_dat_len >> 12) & PANDA_DLC_MASK);    // This Worked
+  //printk("cf->can_dlc was %x\n", cf->can_dlc);
 #else
   cf->can_dlc = can_cc_dlc2len(msg->bus_dat_len & PANDA_DLC_MASK);
 #endif
 
+  // printk("cf->can_dlc was %x\n", cf->can_dlc);
+  // printk("msg->rir was %x\n", msg->rir);
+  // printk("cf->can_id was %x\n", cf->can_id);
+
   memcpy(cf->data, msg->data, cf->can_dlc);
+
+  // printk("msg->data[0] was %x\n", msg->data[0]);
+  // printk("msg->data[1] was %x\n", msg->data[1]);
+  // printk("msg->data[2] was %x\n", msg->data[2]);
+  // printk("msg->data[3] was %x\n", msg->data[3]);
+  // printk("msg->data[4] was %x\n", msg->data[4]);
+  // printk("msg->data[5] was %x\n", msg->data[5]);
+  // printk("msg->data[6] was %x\n", msg->data[6]);
+  // printk("msg->data[7] was %x\n", msg->data[7]);
 
   stats->rx_packets++;
   stats->rx_bytes += cf->can_dlc;
@@ -324,11 +364,19 @@ static void panda_usb_read_int_callback(struct urb *urb)
       break;
     }
 
+    // printk("Size of Panda usb can msg %d\n", sizeof(struct panda_usb_can_msg));
+    // printk("urb->actual_length %d\n", urb->actual_length);
+    // printk("urb->transfer_buffer %x\n", urb->transfer_buffer);
+    // printk("pos before %d\n", pos);
+
+
     msg = (struct panda_usb_can_msg *)(urb->transfer_buffer + pos);
+    // printk("msg %x\n", msg);
 
     panda_usb_process_can_rx(priv_dev, msg);
 
     pos += sizeof(struct panda_usb_can_msg);
+    // printk("pos after %d\n", pos);
   }
 
  resubmit_urb:
@@ -459,35 +507,60 @@ static netdev_tx_t panda_usb_start_xmit(struct sk_buff *skb,
 
   //Warning: cargo cult. Can't tell what this is for, but it is
   //everywhere and encouraged in the documentation.
-  can_put_echo_skb(skb, priv_inf->netdev, ctx->ndx, NULL);
+  can_put_echo_skb(skb, priv_inf->netdev, ctx->ndx);
 
+  // if(cf->can_id & CAN_EFF_FLAG){
+  //   usb_msg.rir = cpu_to_le32(((cf->can_id & 0x1FFFFFFF) << 3) |
+	// 		      PANDA_CAN_TRANSMIT | PANDA_CAN_EXTENDED);
   if(cf->can_id & CAN_EFF_FLAG){
     usb_msg.rir = cpu_to_le32(((cf->can_id & 0x1FFFFFFF) << 3) |
-			      PANDA_CAN_TRANSMIT | PANDA_CAN_EXTENDED);
+			    PANDA_CAN_EXTENDED);
   }else{
-    usb_msg.rir = cpu_to_le32(((cf->can_id & 0x7FF) << 21) | PANDA_CAN_TRANSMIT);
+    //usb_msg.rir = cpu_to_le32(((cf->can_id & 0x7FF) << 21) | PANDA_CAN_TRANSMIT);
+    //usb_msg.rir = cpu_to_le32(((cf->can_id & 0x7FF) << 3) | PANDA_CAN_TRANSMIT);
+    usb_msg.rir = cpu_to_le32(((cf->can_id & 0x7FF) << 3));
+    //usb_msg.rir = cpu_to_le32(((cf->can_id & 0x7FF) << 3) | PANDA_CAN_TRANSMIT);    // I dont think this is correct
   }
-  usb_msg.bus_dat_len = cpu_to_le32((cf->can_dlc & 0x0F) | (bus << 4));
+  //usb_msg.bus_dat_len = cpu_to_le32((cf->can_dlc & 0x0F) | (bus << 4));
+  //usb_msg.bus_dat_len = cpu_to_le16((cf->can_dlc & 0x0F) >> 4 | (bus << 4));
+  //usb_msg.bus_dat_len = cpu_to_le16((cf->can_dlc) & 0x0F);
+  usb_msg.bus_dat_len = cpu_to_le16((cf->can_dlc << 12) & 0xF000 | ((bus << 9) & 0x0E00));
+
+  printk("usb_msg.rir %x", usb_msg.rir);
+  printk("usb_msg.bus_dat_len %x", usb_msg.bus_dat_len);
+  printk("cf->can_dlc %x", cf->can_dlc);
 
   memcpy(usb_msg.data, cf->data, cf->can_dlc);
+
+  printk("usb_msg.data[0] was %x\n", usb_msg.data[0]);
+  printk("usb_msg.data[1] was %x\n", usb_msg.data[1]);
+  printk("usb_msg.data[2] was %x\n", usb_msg.data[2]);
+  printk("usb_msg.data[3] was %x\n", usb_msg.data[3]);
+  printk("usb_msg.data[4] was %x\n", usb_msg.data[4]);
+  printk("usb_msg.data[5] was %x\n", usb_msg.data[5]);
+  printk("usb_msg.data[6] was %x\n", usb_msg.data[6]);
+  printk("usb_msg.data[7] was %x\n", usb_msg.data[7]);
 
   //TODO Handle Remote Frames
   //if (cf->can_id & CAN_RTR_FLAG)
   //  usb_msg.dlc |= PANDA_DLC_RTR_MASK;
 
   netdev_err(netdev, "Received data from socket. canid: %x; len: %d\n", cf->can_id, cf->can_dlc);
+  //printk("netdev_err");
 
   err = panda_usb_xmit(priv_inf, &usb_msg, ctx);
+  //printk("err is %d", err);
   if (err)
     goto xmit_failed;
 
   return NETDEV_TX_OK;
 
  xmit_failed:
-  can_free_echo_skb(priv_inf->netdev, ctx->ndx, NULL);
+  can_free_echo_skb(priv_inf->netdev, ctx->ndx);
   panda_usb_free_ctx(ctx);
-  dev_kfree_skb_any(skb);
+  dev_kfree_skb(skb);
   stats->tx_dropped++;
+  printk("usb_xmit failed");
 
   return NETDEV_TX_OK;
 }
@@ -561,6 +634,18 @@ static int panda_usb_probe(struct usb_interface *intf,
   err = panda_set_output_enable(priv_inf, true);
   if (err) {
     dev_info(&intf->dev, "Failed to initialize send enable message to Panda.\n");
+    goto cleanup_candev;
+  }
+
+  err = panda_disable_hb_checks(priv_inf);
+  if (err) {
+    dev_info(&intf->dev, "Failed to send disable heart beat check message to Panda.\n");
+    goto cleanup_candev;
+  }
+
+  err = panda_set_power_save_state(priv_inf);
+  if (err) {
+    dev_info(&intf->dev, "Failed to send set power save state message to Panda.\n");
     goto cleanup_candev;
   }
 
