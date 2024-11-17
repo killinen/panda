@@ -11,6 +11,7 @@ const int HYUNDAI_MAX_ACCEL = 200;  // 1/100 m/s2
 const int HYUNDAI_MIN_ACCEL = -350; // 1/100 m/s2
 
 const CanMsg HYUNDAI_TX_MSGS[] = {
+  {558, 1, 5}, // SSC Bus 1 with BP
   {832, 0, 8},  // LKAS11 Bus 0
   {1265, 0, 4}, // CLU11 Bus 0
   {1157, 0, 4}, // LFAHDA_MFC Bus 0
@@ -30,12 +31,31 @@ const CanMsg HYUNDAI_LONG_TX_MSGS[] = {
   {2000, 0, 8}, // radar UDS TX addr Bus 0 (for radar disable)
  };
 
+// Each AddrCheckStruct.msg array supports up to 3 CAN messages for validation.
+// 1. Why 3 Entries?
+//    - Allows monitoring of multiple related messages (e.g., torque and checksum checks).
+//    - Fixed size ensures predictable memory usage and simplifies parsing logic in embedded systems.
+//    - Balances memory efficiency and future expandability for features needing multiple messages.
+// 2. Why Are They Not All Populated?
+//    - Not all features require multiple messages; some only need 1 or 2 messages.
+//    - Unused entries are initialized to { 0 }, which marks them as placeholders.
+//    - This avoids wasting memory and ensures clarity in code maintenance.
+// 3. Use in Functions:
+//    - Functions processing the msg array loop through all entries and stop at { 0 }, 
+//      which acts as a termination marker.
+//    - This eliminates the need for explicit array length tracking, simplifying runtime logic.
 AddrCheckStruct hyundai_addr_checks[] = {
-  {.msg = {{608, 0, 8, .check_checksum = true, .max_counter = 3U, .expected_timestep = 10000U},
-           {881, 0, 8, .expected_timestep = 10000U}, { 0 }}},
-  {.msg = {{902, 0, 8, .check_checksum = true, .max_counter = 15U, .expected_timestep = 10000U}, { 0 }, { 0 }}},
-  {.msg = {{916, 0, 8, .check_checksum = true, .max_counter = 7U, .expected_timestep = 10000U}, { 0 }, { 0 }}},
-  {.msg = {{1057, 0, 8, .check_checksum = true, .max_counter = 15U, .expected_timestep = 20000U}, { 0 }, { 0 }}},
+  {.msg = {{0x081, 0, 8, .check_checksum = true, .max_counter = 15U, .expected_timestep = 12000U}, { 0 }, { 0 }}},   // EMS_DCT2 (129)
+  {.msg = {{0x165, 0, 8, .check_checksum = true, .max_counter = 15U, .expected_timestep = 12000U}, { 0 }, { 0 }}},   // VSM2 (357)
+  {.msg = {{0x1F1, 0, 8, .check_checksum = false, .expected_timestep = 20000U}, { 0 }, { 0 }}},                      // TCS5 (497)
+  {.msg = {{0x260, 0, 8, .check_checksum = true, .max_counter = 3U, .expected_timestep = 12000U}, { 0 }, { 0 }}},    // EMS6 (260)
+  {.msg = {{0x2B0, 0, 5, .check_checksum = true, .max_counter = 15U, .expected_timestep = 12000U}, { 0 }, { 0 }}},   // SAS1 (688)
+  {.msg = {{0x22F, 1, 8, .check_checksum = false, .max_counter = 15U, .expected_timestep = 10000U}, { 0 }, { 0 }}},  // SSC (559)
+  // {.msg = {{608, 0, 8, .check_checksum = true, .max_counter = 3U, .expected_timestep = 10000U},
+  //          {881, 0, 8, .expected_timestep = 10000U}, { 0 }}},
+  // {.msg = {{902, 0, 8, .check_checksum = true, .max_counter = 15U, .expected_timestep = 10000U}, { 0 }, { 0 }}},
+  // {.msg = {{916, 0, 8, .check_checksum = true, .max_counter = 7U, .expected_timestep = 10000U}, { 0 }, { 0 }}},
+  // {.msg = {{1057, 0, 8, .check_checksum = true, .max_counter = 15U, .expected_timestep = 20000U}, { 0 }, { 0 }}},
 };
 #define HYUNDAI_ADDR_CHECK_LEN (sizeof(hyundai_addr_checks) / sizeof(hyundai_addr_checks[0]))
 
@@ -73,14 +93,22 @@ static uint8_t hyundai_get_counter(CANPacket_t *to_push) {
   int addr = GET_ADDR(to_push);
 
   uint8_t cnt;
-  if (addr == 608) {
-    cnt = (GET_BYTE(to_push, 7) >> 4) & 0x3U;
+  if (addr == 129) {
+    cnt = GET_BYTE(to_push, 7) & 0xF;
+  } else if (addr == 357) {
+    cnt = GET_BYTE(to_push, 6) & 0xF;
+  } else if (addr == 559) {
+    cnt = GET_BYTE(to_push, 1) & 0xF;
+  } else if (addr == 608) {
+    cnt = (GET_BYTE(to_push, 7) >> 4) & 0x3;
+  } else if (addr == 688) {
+    cnt = GET_BYTE(to_push, 4) & 0xF;
   } else if (addr == 902) {
     cnt = ((GET_BYTE(to_push, 3) >> 6) << 2) | (GET_BYTE(to_push, 1) >> 6);
   } else if (addr == 916) {
-    cnt = (GET_BYTE(to_push, 1) >> 5) & 0x7U;
+    cnt = (GET_BYTE(to_push, 1) >> 5) & 0x7;
   } else if (addr == 1057) {
-    cnt = GET_BYTE(to_push, 7) & 0xFU;
+    cnt = GET_BYTE(to_push, 7) & 0xF;
   } else if (addr == 1265) {
     cnt = (GET_BYTE(to_push, 3) >> 4) & 0xFU;
   } else {
@@ -93,12 +121,18 @@ static uint8_t hyundai_get_checksum(CANPacket_t *to_push) {
   int addr = GET_ADDR(to_push);
 
   uint8_t chksum;
-  if (addr == 608) {
-    chksum = GET_BYTE(to_push, 7) & 0xFU;
-  } else if (addr == 902) {
-    chksum = ((GET_BYTE(to_push, 7) >> 6) << 2) | (GET_BYTE(to_push, 5) >> 6);
+  if (addr == 129) {
+    chksum = (GET_BYTE(to_push, 7) >> 4) & 0xF;
+  } else if (addr == 357) {
+    chksum = GET_BYTE(to_push, 7);
+  } else if (addr == 559) {
+    chksum = GET_BYTE(to_push, 0);
+  } else if (addr == 608) {
+    chksum = GET_BYTE(to_push, 7) & 0xF;
+  } else if (addr == 688) {
+    chksum = (GET_BYTE(to_push, 4) >> 4) & 0xF;
   } else if (addr == 916) {
-    chksum = GET_BYTE(to_push, 6) & 0xFU;
+    chksum = GET_BYTE(to_push, 6) & 0xF;
   } else if (addr == 1057) {
     chksum = GET_BYTE(to_push, 7) >> 4;
   } else {
@@ -111,33 +145,51 @@ static uint8_t hyundai_compute_checksum(CANPacket_t *to_push) {
   int addr = GET_ADDR(to_push);
 
   uint8_t chksum = 0;
-  if (addr == 902) {
-    // count the bits
-    for (int i = 0; i < 8; i++) {
+  uint8_t data_length = 8;
+  if (addr == 357 || addr == 688) {
+    data_length = (addr == 688) ? 5 : 7;
+    // Use XOR checksum algorithm on the first 7 bytes for 357 and 5 bytes for 688
+    for (int i = 0; i < data_length; i++) {
       uint8_t b = GET_BYTE(to_push, i);
-      for (int j = 0; j < 8; j++) {
-        uint8_t bit = 0;
-        // exclude checksum and counter
-        if (((i != 1) || (j < 6)) && ((i != 3) || (j < 6)) && ((i != 5) || (j < 6)) && ((i != 7) || (j < 6))) {
-          bit = (b >> (uint8_t)j) & 1U;
-        }
-        chksum += bit;
+      // Remove checksum nibble based on address and byte position
+      if (addr == 688 && i == 4) {
+        b &= 0x0FU;  // Mask checksum byte
       }
+      chksum ^= b;
     }
-    chksum = (chksum ^ 9U) & 15U;
-  } else {
-    // sum of nibbles
-    for (int i = 0; i < 8; i++) {
-      if ((addr == 916) && (i == 7)) {
-        continue; // exclude
-      }
+    if (addr == 688) {
+      //chksum &= 0x0FU;
+      chksum = (chksum & 0x0F) ^ (chksum >> 4);
+    }
+  } else if (addr == 559) {
+    uint16_t ssc_chksum = addr;
+    data_length = 7;
+    // 0 byte is the checksum
+    for (int i = 1; i < data_length; i++) {
       uint8_t b = GET_BYTE(to_push, i);
-      if (((addr == 608) && (i == 7)) || ((addr == 916) && (i == 6)) || ((addr == 1057) && (i == 7))) {
-        b &= (addr == 1057) ? 0x0FU : 0xF0U; // remove checksum
+      ssc_chksum += b;
+    }
+    // Add upper and lower bytes of the checksum
+    ssc_chksum = (ssc_chksum & 0xFF) + (ssc_chksum >> 8);
+
+    // Mask to keep only the lower 8 bits
+    chksum = ssc_chksum & 0xFF;
+  } else {
+    // Standard checksum algorithm for addresses 608, 916, and 129
+    for (int i = 0; i < data_length; i++) {
+      uint8_t b = GET_BYTE(to_push, i);
+
+      // Remove checksum nibble based on address and byte position
+      if ((addr == 608 && i == 7) || (addr == 129 && i == 7)) {
+        b &= (addr == 129) ? 0x0FU : 0xF0U;  // Mask checksum byte
       }
+
+      // Sum the nibbles (4-bit parts of the byte)
       chksum += (b % 16U) + (b / 16U);
     }
-    chksum = (16U - (chksum %  16U)) % 16U;
+
+    // Final checksum calculation with modulo 16 for other addresses
+    chksum = (16U - (chksum % 16U)) % 16U;
   }
 
   return chksum;
@@ -152,11 +204,12 @@ static int hyundai_rx_hook(CANPacket_t *to_push) {
   if (valid && (GET_BUS(to_push) == 0U)) {
     int addr = GET_ADDR(to_push);
 
-    if (addr == 593) {
-      int torque_driver_new = ((GET_BYTES_04(to_push) & 0x7ffU) * 0.79) - 808; // scale down new driver torque signal to match previous one
-      // update array of samples
-      update_sample(&torque_driver, torque_driver_new);
-    }
+    // Skip the steer torque as now, add in SSC stuff later
+    // if (addr == 593) {
+    //   int torque_driver_new = ((GET_BYTES_04(to_push) & 0x7ffU) * 0.79) - 808; // scale down new driver torque signal to match previous one
+    //   // update array of samples
+    //   update_sample(&torque_driver, torque_driver_new);
+    // }
 
     if (hyundai_longitudinal) {
       // ACC steering wheel buttons
@@ -176,9 +229,9 @@ static int hyundai_rx_hook(CANPacket_t *to_push) {
       }
     } else {
       // enter controls on rising edge of ACC, exit controls on ACC off
-      if (addr == 1057) {
-        // 2 bits: 13-14
-        int cruise_engaged = (GET_BYTES_04(to_push) >> 13) & 0x3U;
+      if (addr == 608) {
+        // 3 bit from 3 byte
+        int cruise_engaged = (GET_BYTE(to_push, 3) >> 2) & 0x01;
         if (cruise_engaged && !cruise_engaged_prev) {
           controls_allowed = 1;
         }
@@ -200,17 +253,18 @@ static int hyundai_rx_hook(CANPacket_t *to_push) {
     }
 
     // sample wheel speed, averaging opposite corners
-    if (addr == 902) {
-      int hyundai_speed = (GET_BYTES_04(to_push) & 0x3FFFU) + ((GET_BYTES_48(to_push) >> 16) & 0x3FFFU);  // FL + RR
-      hyundai_speed /= 2;
+    if (addr == 497) {    // 0x1F1
+      int hyundai_speed = (GET_BYTES_04(to_push) >> 16) & 0xFFF;  // FL
+      hyundai_speed += (GET_BYTES_48(to_push) >> 20) & 0xFFF;  // RR
+      hyundai_speed *= 2;		// This was originally divided by 2 but this is hack for i30 12bit (vs 14bit) speed value comply with HYUNDAI_STANDSTILL_THRSLD
       vehicle_moving = hyundai_speed > HYUNDAI_STANDSTILL_THRSLD;
     }
 
-    if (addr == 916) {
-      brake_pressed = (GET_BYTE(to_push, 6) >> 7) != 0U;
+    if (addr == 129) {    // 0x081
+      brake_pressed = (GET_BYTE(to_push, 0) >> 7) != 0;
     }
 
-    bool stock_ecu_detected = (addr == 832);
+    bool stock_ecu_detected = false;
 
     // If openpilot is controlling longitudinal we need to ensure the radar is turned off
     // Enforce by checking we don't see SCC12
