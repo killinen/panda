@@ -404,7 +404,11 @@ static int hyundai_fwd_hook(int bus_num, CANPacket_t *to_fwd) {
     bus_fwd = 0;
   }
 
+  bus_fwd = -1;
+
   return bus_fwd;
+  // No forwarding
+  //return -1;
 }
 
 static const addr_checks* hyundai_init(int16_t param) {
