@@ -185,27 +185,27 @@ static uint32_t hyundai_compute_checksum(CANPacket_t *to_push) {
       }
       // Add upper and lower bytes of the checksum
       ssc_chksum = (ssc_chksum & 0xFF) + (ssc_chksum >> 8);
-  
+
       // Mask to keep only the lower 8 bits
       chksum = ssc_chksum & 0xFF;
     } else {
       // Standard checksum algorithm for addresses 608, 916, and 129
       for (int i = 0; i < data_length; i++) {
         uint8_t b = GET_BYTE(to_push, i);
-  
+
         // Remove checksum nibble based on address and byte position
         if ((addr == 608 && i == 7) || (addr == 129 && i == 7)) {
           b &= (addr == 129) ? 0x0FU : 0xF0U;  // Mask checksum byte
         }
-  
+
         // Sum the nibbles (4-bit parts of the byte)
         chksum += (b % 16U) + (b / 16U);
       }
-  
+
       // Final checksum calculation with modulo 16 for other addresses
       chksum = (16U - (chksum % 16U)) % 16U;
     }
-  
+
     return chksum;
   }
 
@@ -432,6 +432,9 @@ static int hyundai_fwd_hook(int bus_num, CANPacket_t *to_fwd) {
   if ((bus_num == 2) && (addr != 832) && (addr != 1157)) {
     bus_fwd = 0;
   }
+
+  // No forwarding for i30 thank you
+  bus_fwd = -1;
 
   return bus_fwd;
 }
