@@ -10,8 +10,11 @@ const int HYUNDAI_STANDSTILL_THRSLD = 30;  // ~1kph
 const int HYUNDAI_MAX_ACCEL = 200;  // 1/100 m/s2
 const int HYUNDAI_MIN_ACCEL = -350; // 1/100 m/s2
 
+#define I30_GET_INTERCEPTOR(msg) (((GET_BYTE((msg), 0) << 8) + GET_BYTE((msg), 1) + (GET_BYTE((msg), 2) << 8) + GET_BYTE((msg), 3)) / 2U) // avg between 2 tracks
+// #define HYUNDAI_GAS_INTERCEPTOR_SAFETY
+
 const CanMsg HYUNDAI_TX_MSGS[] = {
-  {558, 1, 5}, // SSC Bus 1 with BP
+  {558, 1, 5},  // SSC Bus 1
   {832, 0, 8},  // LKAS11 Bus 0
   {1265, 0, 4}, // CLU11 Bus 0
   {1157, 0, 4}, // LFAHDA_MFC Bus 0
@@ -30,6 +33,14 @@ const CanMsg HYUNDAI_LONG_TX_MSGS[] = {
   {1155, 0, 8}, // FCA12 Bus 0
   {2000, 0, 8}, // radar UDS TX addr Bus 0 (for radar disable)
  };
+
+const CanMsg HYUNDAI_I30_LONG_TX_MSGS[] = {
+  {512, 1, 6},  // GAS_COMMAND Bus 1
+  {558, 1, 5},  // SSC Bus 1
+  {832, 0, 8},  // LKAS11 Bus 0
+  {1265, 0, 4}, // CLU11 Bus 0
+  {1157, 0, 4}, // LFAHDA_MFC Bus 0
+};
 
  // Each AddrCheckStruct.msg array supports up to 3 CAN messages for validation.
 // 1. Why 3 Entries?
@@ -81,6 +92,7 @@ AddrCheckStruct hyundai_legacy_addr_checks[] = {
 const int HYUNDAI_PARAM_EV_GAS = 1;
 const int HYUNDAI_PARAM_HYBRID_GAS = 2;
 const int HYUNDAI_PARAM_LONGITUDINAL = 4;
+const int HYUNDAI_PARAM_I30_LONGITUDINAL = 17;
 
 enum {
   HYUNDAI_BTN_NONE = 0,
@@ -98,8 +110,40 @@ bool hyundai_legacy = false;
 bool hyundai_ev_gas_signal = false;
 bool hyundai_hybrid_gas_signal = false;
 bool hyundai_longitudinal = false;
+bool i30_longitudinal = false;
+
+#ifdef HYUNDAI_GAS_INTERCEPTOR_SAFETY
+static uint8_t counter_pedal_last = 0;
+#endif
 
 addr_checks hyundai_rx_checks = {hyundai_addr_checks, HYUNDAI_ADDR_CHECK_LEN};
+
+#ifdef HYUNDAI_GAS_INTERCEPTOR_SAFETY
+static uint8_t crc8_pedal(const uint8_t *data, int len) {
+  uint8_t crc = 0xFF;
+  const uint8_t poly = 0xD5;
+  for (int i = len - 1; i >= 0; i--) {
+    crc ^= data[i];
+    for (int j = 0; j < 8; j++) {
+      if ((crc & 0x80U) != 0) {
+        crc = (uint8_t)((crc << 1) ^ poly);
+      } else {
+        crc <<= 1;
+      }
+    }
+  }
+  return crc;
+}
+
+// Wrapper for CANPacket_t
+static uint8_t hyundai_compute_pedal_crc(CANPacket_t *to_push) {
+  uint8_t dat[5];
+  for (int i = 0; i < 5; i++) {
+    dat[i] = GET_BYTE(to_push, i);
+  }
+  return crc8_pedal(dat, 5);
+}
+#endif
 
 static uint8_t hyundai_get_counter(CANPacket_t *to_push) {
     int addr = GET_ADDR(to_push);
@@ -226,9 +270,10 @@ static int hyundai_rx_hook(CANPacket_t *to_push) {
     // }
 
     // ACC steering wheel buttons
-    if (addr == 1265) {
+    // I think this is OP cruise state machine, I just mod this to my own use
+    if (addr == 1264) {   // Changed the cruise button adress for I30 1265 -> 1264
       int cruise_button = GET_BYTE(to_push, 0) & 0x7U;
-      int main_button = GET_BIT(to_push, 3U);
+      int main_button = GET_BIT(to_push, 24U);
 
       if ((cruise_button == HYUNDAI_BTN_RESUME) || (cruise_button == HYUNDAI_BTN_SET) || (cruise_button == HYUNDAI_BTN_CANCEL) || (main_button != 0)) {
         hyundai_last_button_interaction = 0U;
@@ -236,7 +281,7 @@ static int hyundai_rx_hook(CANPacket_t *to_push) {
         hyundai_last_button_interaction = MIN(hyundai_last_button_interaction + 1U, HYUNDAI_PREV_BUTTON_SAMPLES);
       }
 
-      if (hyundai_longitudinal) {
+      if (hyundai_longitudinal || i30_longitudinal) {
         // exit controls on cancel press
         if (cruise_button == HYUNDAI_BTN_CANCEL) {
           controls_allowed = 0;
@@ -254,7 +299,7 @@ static int hyundai_rx_hook(CANPacket_t *to_push) {
     }
 
     // enter controls on rising edge of ACC and user button press, exit controls when ACC off
-    if (!hyundai_longitudinal && (addr == 608)) {
+    if ((!hyundai_longitudinal && !i30_longitudinal) && (addr == 608)) {
       // 3 bit from byte 3
       //int cruise_engaged = (GET_BYTES_04(to_push) >> 13) & 0x3U;
       //if (cruise_engaged && !cruise_engaged_prev && (hyundai_last_button_interaction < HYUNDAI_PREV_BUTTON_SAMPLES)) {
@@ -269,14 +314,24 @@ static int hyundai_rx_hook(CANPacket_t *to_push) {
       cruise_engaged_prev = cruise_engaged;
     }
 
+    // check for gas interceptor
+    if (addr == 513) {
+      gas_interceptor_detected = true;
+      int gas_interceptor = I30_GET_INTERCEPTOR(to_push);
+      const int I30_GAS_INTERCEPTOR_THRESHOLD = 2340; // avg of raw vals at 0 gas is 2250
+      gas_pressed = gas_interceptor > I30_GAS_INTERCEPTOR_THRESHOLD;
+    }
+
     // read gas pressed signal
-    if ((addr == 881) && hyundai_ev_gas_signal) {
-      gas_pressed = (((GET_BYTE(to_push, 4) & 0x7FU) << 1) | GET_BYTE(to_push, 3) >> 7) != 0U;
-    } else if ((addr == 881) && hyundai_hybrid_gas_signal) {
-      gas_pressed = GET_BYTE(to_push, 7) != 0U;
-    } else if (addr == 608) {  // ICE
-      gas_pressed = (GET_BYTE(to_push, 7) >> 6) != 0U;
-    } else {
+    if (!gas_interceptor_detected) {
+      if ((addr == 881) && hyundai_ev_gas_signal) {
+        gas_pressed = (((GET_BYTE(to_push, 4) & 0x7FU) << 1) | GET_BYTE(to_push, 3) >> 7) != 0U;
+      } else if ((addr == 881) && hyundai_hybrid_gas_signal) {
+        gas_pressed = GET_BYTE(to_push, 7) != 0U;
+      } else if (addr == 608) {  // ICE
+        gas_pressed = (GET_BYTE(to_push, 7) >> 6) != 0U;
+      } else {
+      }
     }
 
     // sample wheel speed, averaging opposite corners
@@ -293,6 +348,15 @@ static int hyundai_rx_hook(CANPacket_t *to_push) {
 
     bool stock_ecu_detected = false;
 
+    // For i30 longitudinal, fault if stock cruise is in the MAIN (standby) state,
+    // to prevent it from activating when we press cruise buttons for openpilot.
+    // We check CRUISE_LAMP_M on message 608 (bit 25).
+    if (i30_longitudinal && (addr == 608)) {
+      if ((GET_BYTE(to_push, 3) >> 1) & 0x1U) {
+        stock_ecu_detected = true;
+      }
+    }
+
     // If openpilot is controlling longitudinal we need to ensure the radar is turned off
     // Enforce by checking we don't see SCC12
     if (hyundai_longitudinal && (addr == 1057)) {
@@ -308,11 +372,60 @@ static int hyundai_tx_hook(CANPacket_t *to_send, bool longitudinal_allowed) {
   int tx = 1;
   int addr = GET_ADDR(to_send);
 
-  if (hyundai_longitudinal) {
+  if (i30_longitudinal) {
+    tx = msg_allowed(to_send, HYUNDAI_I30_LONG_TX_MSGS, sizeof(HYUNDAI_I30_LONG_TX_MSGS)/sizeof(HYUNDAI_I30_LONG_TX_MSGS[0]));
+  } else if (hyundai_longitudinal) {
     tx = msg_allowed(to_send, HYUNDAI_LONG_TX_MSGS, sizeof(HYUNDAI_LONG_TX_MSGS)/sizeof(HYUNDAI_LONG_TX_MSGS[0]));
   } else {
     tx = msg_allowed(to_send, HYUNDAI_TX_MSGS, sizeof(HYUNDAI_TX_MSGS)/sizeof(HYUNDAI_TX_MSGS[0]));
   }
+
+#ifdef HYUNDAI_GAS_INTERCEPTOR_SAFETY
+  // GAS Pedal Interceptor command
+  if (addr == 512) {
+    bool enable = GET_BIT(to_send, 39U);
+    int gas_command = GET_BYTE(to_send, 0) | (GET_BYTE(to_send, 1) << 8);
+    int gas_command2 = GET_BYTE(to_send, 2) | (GET_BYTE(to_send, 3) << 8);
+    uint8_t counter = (GET_BYTE(to_send, 4) >> 0) & 0xFU;
+    uint8_t checksum = GET_BYTE(to_send, 5);
+
+    bool violation = false;
+    const int GAS_COMMAND_MIN = 3600;
+    const int GAS_COMMAND_MAX = 3608;
+    const int GAS_COMMAND2_MIN = 900;
+    const int GAS_COMMAND2_MAX = 904;
+
+    if (enable) {
+      if ((gas_command < GAS_COMMAND_MIN) || (gas_command > GAS_COMMAND_MAX)) {
+        violation = true;
+      }
+      if ((gas_command2 < GAS_COMMAND2_MIN) || (gas_command2 > GAS_COMMAND2_MAX)) {
+        violation = true;
+      }
+      // What does longitudinal_allowed mean?
+      if (!longitudinal_allowed) {
+        violation = true;
+      }
+    } else {
+      if ((gas_command != GAS_COMMAND_MIN) || (gas_command2 != GAS_COMMAND2_MIN)) {
+        violation = true;
+      }
+    }
+
+    if (((counter_pedal_last + 1U) & 0xFU) != counter) {
+      violation = true;
+    }
+
+    if (hyundai_compute_pedal_crc(to_send) != checksum) {
+      violation = true;
+    }
+
+    if (violation) {
+      tx = 0;
+    }
+    counter_pedal_last = counter;
+  }
+#endif
 
   // FCA11: Block any potential actuation
   if (addr == 909) {
@@ -333,7 +446,7 @@ static int hyundai_tx_hook(CANPacket_t *to_send, bool longitudinal_allowed) {
     int aeb_decel_cmd = GET_BYTE(to_send, 2);
     int aeb_req = GET_BIT(to_send, 54U);
 
-    bool violation = 0;
+    bool violation = false;
 
     if (!longitudinal_allowed) {
       if ((desired_accel_raw != 0) || (desired_accel_val != 0)) {
@@ -356,7 +469,7 @@ static int hyundai_tx_hook(CANPacket_t *to_send, bool longitudinal_allowed) {
     int desired_torque = ((GET_BYTES_04(to_send) >> 16) & 0x7ffU) - 1024U;
     bool steer_req = GET_BIT(to_send, 27U) != 0U;
     uint32_t ts = microsecond_timer_get();
-    bool violation = 0;
+    bool violation = false;
 
     if (controls_allowed) {
 
@@ -407,6 +520,7 @@ static int hyundai_tx_hook(CANPacket_t *to_send, bool longitudinal_allowed) {
   }
 
   // BUTTONS: used for resume spamming and cruise cancellation
+  // TODO!!!! When have time look at this, in I30 there is same msg ID, but different functionality (CLU3)
   if ((addr == 1265) && !hyundai_longitudinal) {
     int button = GET_BYTE(to_send, 0) & 0x7U;
 
@@ -444,6 +558,7 @@ static const addr_checks* hyundai_init(uint16_t param) {
   hyundai_ev_gas_signal = GET_FLAG(param, HYUNDAI_PARAM_EV_GAS);
   hyundai_hybrid_gas_signal = !hyundai_ev_gas_signal && GET_FLAG(param, HYUNDAI_PARAM_HYBRID_GAS);
   hyundai_last_button_interaction = HYUNDAI_PREV_BUTTON_SAMPLES;
+  i30_longitudinal = GET_FLAG(param, HYUNDAI_PARAM_I30_LONGITUDINAL);
 
 #ifdef ALLOW_DEBUG
   hyundai_longitudinal = GET_FLAG(param, HYUNDAI_PARAM_LONGITUDINAL);
