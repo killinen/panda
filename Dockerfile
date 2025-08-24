@@ -50,8 +50,8 @@ RUN curl -L https://github.com/pyenv/pyenv-installer/raw/master/bin/pyenv-instal
 ENV PATH="/root/.pyenv/bin:/root/.pyenv/shims:${PATH}"
 
 ENV PANDA_PATH=/tmp/openpilot/panda
-ENV OPENPILOT_REF="ee0dd36a3c775dbd82493c84f4e7272c1eb3fcbd"
-ENV OPENDBC_REF="e8e97fcf00be9a696be009aa37ca13c55b9f632c"
+ENV OPENPILOT_REF="d1015c81b615a349a547e147af0e502b689bedde"
+ENV OPENDBC_REF="5c4481ce869c542c8ef037daaaf985bef20a5089"
 
 COPY requirements.txt /tmp/
 RUN pyenv install 3.8.10 && \
@@ -65,7 +65,7 @@ RUN /tmp/install.sh
 
 RUN git config --global --add safe.directory /tmp/openpilot/panda
 RUN cd /tmp && \
-    git clone https://github.com/commaai/openpilot.git tmppilot || true && \
+    git clone https://github.com/killinen/openpilot.git tmppilot || true && \
     cd /tmp/tmppilot && \
     git fetch origin $OPENPILOT_REF && \
     git checkout $OPENPILOT_REF && \
