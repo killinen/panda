@@ -212,10 +212,9 @@ void ignition_can_hook(CANPacket_t *to_push) {
       ignition_can = (GET_BYTE(to_push, 0) >> 5) == 0x6U;
     }
 
-    // I30 exception C2 not detecting IGN signal
-    if ((addr == 0x130) && (len == 8)) {
-      // this message isn't all zeros when ignition is on
-      ignition_can = GET_BYTES_04(to_push) != 0U;
+    // i30 exception: use EMS1 SWI_IGK bit for ignition state
+    if ((addr == 0x316) && (len == 8)) {
+      ignition_can = (GET_BYTE(to_push, 0) & 0x1U) != 0U;
     }
 
   }
