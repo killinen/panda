@@ -121,7 +121,8 @@ jobs:
         run: $PERSIST "cd /tmp/openpilot/panda/tests/misra && ./test_misra.sh"
 
       - name: Copy analysis outputs
-        run: docker cp panda:/tmp/misra /tmp
+        if: always()
+        run: docker cp panda:/tmp/misra /tmp || true
 
       # 🔁 UPDATED to v4 (no more v2 deprecation)
       - uses: actions/upload-artifact@v4

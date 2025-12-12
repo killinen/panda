@@ -213,6 +213,8 @@ void ignition_can_hook(CANPacket_t *to_push) {
     }
 
     // i30 exception: use EMS1 SWI_IGK bit for ignition state
+    // Keep ignition detection independent of safety mode, since ignition state can be needed
+    // before the host sets the safety mode (and also while in SILENT after heartbeat loss).
     if ((addr == 0x316) && (len == 8)) {
       ignition_can = (GET_BYTE(to_push, 0) & 0x1U) != 0U;
     }
