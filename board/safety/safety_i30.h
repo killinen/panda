@@ -392,7 +392,10 @@ static int i30_tx_hook(CANPacket_t *to_send, bool longitudinal_allowed) {
       }
     }
 
-    if (((counter_pedal_last + 1U) & 0xFU) != counter) {
+    const bool neutral = !enable && (gas_command == GAS_COMMAND_MIN) && (gas_command2 == GAS_COMMAND2_MIN);
+    const bool counter_valid = (((counter_pedal_last + 1U) & 0xFU) == counter);
+    const bool counter_initted = (counter_pedal_last != 0xFFU);
+    if ((!counter_initted || !counter_valid) && !neutral) {
       violation = true;
     }
 
@@ -403,7 +406,9 @@ static int i30_tx_hook(CANPacket_t *to_send, bool longitudinal_allowed) {
     if (violation) {
       tx = 0;
     } else {
-      counter_pedal_last = counter;
+      if (tx != 0) {
+        counter_pedal_last = counter;
+      }
     }
   }
 #endif
@@ -507,6 +512,9 @@ static const addr_checks* i30_init(uint16_t param) {
   // Default to lateral-only. Enable pedal interceptor longitudinal with the flag.
   i30_longitudinal = GET_FLAG(param, I30_PARAM_LONGITUDINAL);
   i30_stock_cruise_main = false;
+#ifdef I30_GAS_INTERCEPTOR_SAFETY
+  counter_pedal_last = 0xFFU;
+#endif
 
   if (i30_longitudinal) {
     i30_rx_checks = (addr_checks){i30_long_addr_checks, I30_LONG_ADDR_CHECK_LEN};
