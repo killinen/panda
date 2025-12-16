@@ -11,7 +11,6 @@ const int I30_MAX_ACCEL = 200;  // 1/100 m/s2
 const int I30_MIN_ACCEL = -350; // 1/100 m/s2
 
 #define I30_GET_INTERCEPTOR(msg) (((GET_BYTE((msg), 0) << 8) + GET_BYTE((msg), 1) + (GET_BYTE((msg), 2) << 8) + GET_BYTE((msg), 3)) / 2U) // avg between 2 tracks
-#define I30_GAS_INTERCEPTOR_SAFETY
 
 // These are messages that will/can be sent to the busses
 const CanMsg I30_TX_MSGS[] = {
@@ -87,14 +86,10 @@ uint8_t i30_last_button_interaction;  // button messages since the user pressed 
 // bool i30_hybrid_gas_signal = false;
 bool i30_longitudinal = false;
 static bool i30_stock_cruise_main = false;
-
-#ifdef I30_GAS_INTERCEPTOR_SAFETY
 static uint8_t counter_pedal_last = 0;
-#endif
 
 addr_checks i30_rx_checks = {i30_addr_checks, I30_ADDR_CHECK_LEN};
 
-#ifdef I30_GAS_INTERCEPTOR_SAFETY
 static uint8_t crc8_pedal(const uint8_t *data, int len) {
   uint8_t crc = 0xFFU;
   const uint8_t poly = 0xD5U;
@@ -119,7 +114,6 @@ static uint8_t i30_compute_pedal_crc(CANPacket_t *to_push) {
   }
   return crc8_pedal(dat, 5);
 }
-#endif
 
 static uint8_t i30_get_counter(CANPacket_t *to_push) {
     uint32_t addr = GET_ADDR(to_push);
@@ -305,7 +299,7 @@ static int i30_rx_hook(CANPacket_t *to_push) {
     if (addr == 513) {
       gas_interceptor_detected = true;
       int gas_interceptor = I30_GET_INTERCEPTOR(to_push);
-      const int I30_GAS_INTERCEPTOR_THRESHOLD = 2340; // avg of raw vals at 0 gas is 2250
+      const int I30_GAS_INTERCEPTOR_THRESHOLD = 1100; // avg of raw vals at 0 gas is 750
       gas_pressed = gas_interceptor > I30_GAS_INTERCEPTOR_THRESHOLD;
     }
 
@@ -358,20 +352,19 @@ static int i30_tx_hook(CANPacket_t *to_send, bool longitudinal_allowed) {
     tx = msg_allowed(to_send, I30_TX_MSGS, sizeof(I30_TX_MSGS)/sizeof(I30_TX_MSGS[0]));
   }
 
-#ifdef I30_GAS_INTERCEPTOR_SAFETY
   // GAS Pedal Interceptor command
   if (addr == 512) {
     bool enable = GET_BIT(to_send, 39U);
-    int gas_command = GET_BYTE(to_send, 0) | (GET_BYTE(to_send, 1) << 8);
-    int gas_command2 = GET_BYTE(to_send, 2) | (GET_BYTE(to_send, 3) << 8);
+    int gas_command = (GET_BYTE(to_send, 0) << 8) | GET_BYTE(to_send, 1);
+    int gas_command2 = (GET_BYTE(to_send, 2) << 8) | GET_BYTE(to_send, 3);
     uint8_t counter = (GET_BYTE(to_send, 4) >> 0) & 0xFU;
     uint8_t checksum = GET_BYTE(to_send, 5);
 
     bool violation = false;
-    const int GAS_COMMAND_MIN = 3600;
-    const int GAS_COMMAND_MAX = 3608;
-    const int GAS_COMMAND2_MIN = 900;
-    const int GAS_COMMAND2_MAX = 904;
+    const int GAS_COMMAND_MIN = 0;
+    const int GAS_COMMAND_MAX = 2700;
+    const int GAS_COMMAND2_MIN = 0;
+    const int GAS_COMMAND2_MAX = 1300;
 
     if (!i30_longitudinal) {
       violation = true;
@@ -411,7 +404,7 @@ static int i30_tx_hook(CANPacket_t *to_send, bool longitudinal_allowed) {
       }
     }
   }
-#endif
+
 /*
   // LKA STEER: safety check
   if (addr == 832) {
@@ -461,6 +454,7 @@ static int i30_tx_hook(CANPacket_t *to_send, bool longitudinal_allowed) {
     }
   }
 */
+
   // UDS: Only tester present ("\x02\x3E\x80\x00\x00\x00\x00\x00") allowed on diagnostics address
   if (addr == 2000) {
     if ((GET_BYTES_04(to_send) != 0x00803E02U) || (GET_BYTES_48(to_send) != 0x0U)) {
@@ -512,9 +506,7 @@ static const addr_checks* i30_init(uint16_t param) {
   // Default to lateral-only. Enable pedal interceptor longitudinal with the flag.
   i30_longitudinal = GET_FLAG(param, I30_PARAM_LONGITUDINAL);
   i30_stock_cruise_main = false;
-#ifdef I30_GAS_INTERCEPTOR_SAFETY
   counter_pedal_last = 0xFFU;
-#endif
 
   if (i30_longitudinal) {
     i30_rx_checks = (addr_checks){i30_long_addr_checks, I30_LONG_ADDR_CHECK_LEN};
